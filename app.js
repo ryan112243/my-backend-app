@@ -1,98 +1,100 @@
-// 引入 Express 和 mysql2 模組
 const express = require('express');
-const mysql = require('mysql2/promise'); // 使用 promise 版本，讓資料庫操作更簡潔
+const cors = require('cors');
+const mysql = require('mysql2/promise'); // 雖然這裡仍引入 mysql2，但實際上我們將轉換到 pg
+const pg = require('pg'); // 引入 PostgreSQL 的套件
+require('dotenv').config(); // 用來載入 .env 檔案中的環境變數
+
 const app = express();
-const port = 3000;
+const port = process.env.PORT || 3000; // 從環境變數獲取埠號，如果沒有則預設為 3000
 
-// 設置一個新的變數，用來處理跨域請求 (CORS)。
-// 這在前端網頁和後端伺服器運行在不同地址時非常重要！
-// 我們稍後會安裝 CORS 套件
-const cors = require('cors'); 
-app.use(cors()); // 啟用 CORS
+// 使用 CORS 中介軟體，允許所有來源訪問
+app.use(cors());
+// 解析 JSON 格式的請求體
+app.use(express.json());
 
-// 設置 Express 應用程式使用 JSON 格式來解析請求的 body (例如前端送來的表單資料)
-app.use(express.json()); 
-app.use(express.urlencoded({ extended: true })); // 也能處理 URL 編碼的表單資料
-
-
-// 配置資料庫連接資訊
-const dbConfig = {
-    host: 'localhost',   // 資料庫主機地址，通常是你的電腦 (localhost)
-    user: 'root',        // 資料庫使用者名稱 (預設是 root)
-    password: '12345678', // !!! 請把這裡替換成你設定的 MySQL root 密碼 !!!
-    database: 'my_web_db' // 你在 MySQL Workbench 中建立的資料庫名稱
+// --- PostgreSQL 資料庫配置 (用於部署到 Render) ---
+const pgConfig = {
+    user: process.env.DB_USER,
+    host: process.env.DB_HOST,
+    database: process.env.DB_NAME,
+    password: process.env.DB_PASSWORD,
+    port: process.env.DB_PORT,
+    ssl: {
+        rejectUnauthorized: false // 允許自簽名證書，Render 預設為 true
+    }
 };
 
-let connection; // 宣告一個變數來存放資料庫連接
+let pgClient; // 用來儲存 PostgreSQL 連線實例
 
-// 函數：嘗試連接到資料庫
-async function connectToDatabase() {
+async function connectToPostgres() {
     try {
-        connection = await mysql.createConnection(dbConfig);
-        console.log('成功連接到 MySQL 資料庫！');
-    } catch (err) {
-        console.error('連接資料庫失敗:', err);
-        // 如果連接失敗，可以設定一個重試機制或讓應用程式退出
-        setTimeout(connectToDatabase, 5000); // 5 秒後重試連接
+        // 使用 pg.Client 建立單一連線
+        pgClient = new pg.Client(pgConfig);
+        await pgClient.connect();
+        console.log('成功連接到 PostgreSQL 資料庫！');
+
+        // 檢查 messages 表格是否存在，如果不存在則建立
+        const createTableQuery = `
+            CREATE TABLE IF NOT EXISTS messages (
+                id SERIAL PRIMARY KEY,
+                name VARCHAR(255) NOT NULL,
+                content TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        `;
+        await pgClient.query(createTableQuery);
+        console.log('messages 表格已準備好或已存在。');
+
+    } catch (error) {
+        console.error('連接 PostgreSQL 資料庫失敗:', error);
+        // 如果連接失敗，嘗試在一段時間後重新連接
+        setTimeout(connectToPostgres, 5000); // 5 秒後重試
     }
 }
 
-// 在伺服器啟動時就嘗試連接資料庫
-connectToDatabase();
+// 在應用程式啟動時連接到 PostgreSQL
+connectToPostgres();
 
+// --- API 路由 ---
 
-// --- 路由設定 ---
-
-// 根路徑路由
-app.get('/', (req, res) => {
-    res.send('哈囉！這是我的 Express 伺服器，已連接資料庫！');
-});
-
-// 獲取所有留言的路由 (GET 請求)
+// 獲取所有留言
 app.get('/messages', async (req, res) => {
-    if (!connection) {
-        return res.status(500).send('資料庫未連接。');
-    }
     try {
-        // 從 messages 表格中選取所有留言
-        const [rows] = await connection.execute('SELECT id, name, content FROM messages ORDER BY id DESC');
-        res.json(rows); // 將查詢結果以 JSON 格式發送給前端
-    } catch (err) {
-        console.error('查詢留言失敗:', err);
-        res.status(500).send('查詢留言失敗。');
+        const result = await pgClient.query('SELECT id, name, content, created_at FROM messages ORDER BY created_at DESC');
+        res.json(result.rows);
+    } catch (error) {
+        console.error('獲取留言失敗:', error);
+        res.status(500).json({ message: '獲取留言失敗' });
     }
 });
 
-// 新增留言的路由 (POST 請求)
+// 新增留言
 app.post('/messages', async (req, res) => {
-    if (!connection) {
-        return res.status(500).send('資料庫未連接。');
-    }
-    const { name, content } = req.body; // 從請求的 body 中獲取 name 和 content
-
-    // 檢查資料是否完整
+    const { name, content } = req.body;
     if (!name || !content) {
-        return res.status(400).send('姓名和留言內容不能為空。');
+        return res.status(400).json({ message: '姓名和內容為必填項。' });
     }
 
     try {
-        // 將留言插入到 messages 表格中
-        const [result] = await connection.execute(
-            'INSERT INTO messages (name, content) VALUES (?, ?)',
-            [name, content] // 使用 ? 作為佔位符，防止 SQL 注入攻擊，更安全
-        );
-        res.status(201).send({ id: result.insertId, name, content, message: '留言新增成功！' }); // 返回新增的資料 ID 和成功訊息
-    } catch (err) {
-        console.error('新增留言失敗:', err);
-        res.status(500).send('新增留言失敗。');
+        const query = 'INSERT INTO messages (name, content) VALUES ($1, $2) RETURNING *';
+        const values = [name, content];
+        const result = await pgClient.query(query, values);
+        res.status(201).json(result.rows[0]);
+    } catch (error) {
+        console.error('新增留言失敗:', error);
+        res.status(500).json({ message: '新增留言失敗' });
     }
 });
 
 
-// 啟動伺服器並監聽指定的連接埠
+// 簡單的首頁路由 (可選，但對測試部署有幫助)
+app.get('/', (req, res) => {
+    res.send('後端伺服器已啟動並運行中！');
+});
+
+// 啟動伺服器
 app.listen(port, () => {
     console.log(`伺服器已啟動，正在監聽 http://localhost:${port}`);
-    console.log(`你可以訪問 http://localhost:${port}`);
     console.log(`API 獲取留言: http://localhost:${port}/messages`);
-    console.log(`前端網頁需要連接到此伺服器來送出留言。`);
+    console.log('前端網頁需要連接到此伺服器來送出留言。');
 });
