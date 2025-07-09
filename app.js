@@ -1,6 +1,5 @@
 const express = require('express');
 const cors = require('cors');
-const mysql = require('mysql2/promise'); // 雖然這裡仍引入 mysql2，但實際上我們將轉換到 pg
 const pg = require('pg'); // 引入 PostgreSQL 的套件
 require('dotenv').config(); // 用來載入 .env 檔案中的環境變數
 
